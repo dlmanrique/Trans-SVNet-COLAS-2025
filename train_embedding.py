@@ -20,7 +20,6 @@ import argparse
 import copy
 import random
 import numbers
-from torch.utils.tensorboard import SummaryWriter
 from sklearn import metrics
 import wandb
 from datetime import datetime
@@ -43,7 +42,7 @@ torch.use_deterministic_algorithms(True)
 
 
 
-breakpoint()
+
 
 parser = argparse.ArgumentParser(description='lstm training')
 parser.add_argument('-g', '--gpu', default=True, type=bool, help='gpu use, default True')
@@ -64,6 +63,7 @@ parser.add_argument('--nesterov', default=False, type=bool, help='nesterov momen
 parser.add_argument('--sgdadjust', default=1, type=int, help='sgd method adjust lr 0 for step 1 for min, default 1')
 parser.add_argument('--sgdstep', default=5, type=int, help='number of steps to adjust lr for sgd, default 5')
 parser.add_argument('--sgdgamma', default=0.1, type=float, help='gamma of steps to adjust lr for sgd, default 0.1')
+parser.add_argument('--dataset', default='Cholec80', type=str)
 
 args = parser.parse_args()
 
@@ -86,6 +86,18 @@ use_nesterov = args.nesterov
 sgd_adjust_lr = args.sgdadjust
 sgd_step = args.sgdstep
 sgd_gamma = args.sgdgamma
+
+# Configure number of classes depending on dataset
+if args.dataset == 'HeiCo':
+    args.num_classes = 14
+
+elif args.dataset == 'M2CAI':
+    args.num_classes = 8
+
+else:
+    args.num_classes = 7
+
+
 
 num_gpu = torch.cuda.device_count()
 use_gpu = (torch.cuda.is_available() and gpu_usg)
@@ -212,13 +224,15 @@ class ColorJitter(object):
 class CholecDataset(Dataset):
     def __init__(self, file_paths, file_labels, transform=None,
                  loader=pil_loader):
+        
         self.file_paths = file_paths
-        self.file_labels_phase = file_labels[:, 0]
+        self.file_labels_phase = file_labels
         self.transform = transform
         self.loader = loader
+        self.images_base_path = os.path.join('DATASETS', 'PHASES', 'frames')
 
     def __getitem__(self, index):
-        img_names = self.file_paths[index]
+        img_names = os.path.join(self.images_base_path, self.file_paths[index])
         labels_phase = self.file_labels_phase[index]
         imgs = self.loader(img_names)
         if self.transform is not None:
@@ -280,7 +294,13 @@ def get_data(data_path):
     train_num_each_80 = train_test_paths_labels[4]
     val_num_each_80 = train_test_paths_labels[5]
 
+    """train_num_each_80 = [train_test_paths_labels[4][0]]
+    val_num_each_80 = [train_test_paths_labels[5][0]]
 
+    train_paths_80 = train_test_paths_labels[0][:train_num_each_80[0]]
+    val_paths_80 = train_test_paths_labels[1][:val_num_each_80[0]]
+    train_labels_80 = train_test_paths_labels[2][:train_num_each_80[0]]
+    val_labels_80 = train_test_paths_labels[3][:val_num_each_80[0]]"""
 
     print('train_paths_80  : {:6d}'.format(len(train_paths_80)))
     print('train_labels_80 : {:6d}'.format(len(train_labels_80)))
@@ -388,8 +408,6 @@ sig_f = nn.Sigmoid()
 
 
 def train_model(train_dataset, train_num_each, val_dataset, val_num_each, args):
-    # TensorBoard
-    writer = SummaryWriter('runs/emd_lr5e-4/')
 
     train_dataset_80, \
     train_num_each_80, \
@@ -478,8 +496,7 @@ def train_model(train_dataset, train_num_each, val_dataset, val_num_each, args):
             ], lr=learning_rate / 10)
 
     best_model_wts = copy.deepcopy(model.module.state_dict())
-    best_val_accuracy_phase = 0.0
-    correspond_train_acc_phase = 0.0
+    best_val_f1_phase = 0.0
     best_epoch = 0
 
     for epoch in tqdm(range(epochs)):
@@ -504,12 +521,11 @@ def train_model(train_dataset, train_num_each, val_dataset, val_num_each, args):
         model.train()
         train_loss_phase = 0.0
         train_corrects_phase = 0
-        batch_progress = 0.0
         running_loss_phase = 0.0
         minibatch_correct_phase = 0.0
-        train_start_time = time.time()
-
-        for i, data in enumerate(train_loader_80):
+        
+        print('\n Training \n')
+        for i, data in enumerate(tqdm(train_loader_80)):
             optimizer.zero_grad()
             if use_gpu:
                 inputs, labels_phase = data[0].to(device), data[1].to(device)
@@ -536,31 +552,22 @@ def train_model(train_dataset, train_num_each, val_dataset, val_num_each, args):
             train_corrects_phase += batch_corrects_phase
             minibatch_correct_phase += batch_corrects_phase
 
+            wandb.log({
+                'Train loss': loss_phase.data.item(),
+                'Train Accuracy': batch_corrects_phase.data.item() / preds_phase.shape[0]
+                })
 
-            batch_progress += 1
-            if batch_progress * train_batch_size >= num_train_all:
-                percent = 100.0
-                print('Batch progress: %s [%d/%d]' % (str(percent) + '%', num_train_all, num_train_all), end='\n')
-            else:
-                percent = round(batch_progress * train_batch_size / num_train_all * 100, 2)
-                print('Batch progress: %s [%d/%d]' % (
-                str(percent) + '%', batch_progress * train_batch_size, num_train_all), end='\r')
-
-        train_elapsed_time = time.time() - train_start_time
-        train_accuracy_phase = float(train_corrects_phase) / float(num_train_all) * sequence_length
-        train_average_loss_phase = train_loss_phase / num_train_all * sequence_length
 
         # Sets the module in evaluation mode.
         model.eval()
         val_loss_phase = 0.0
         val_corrects_phase = 0
-        val_start_time = time.time()
-        val_progress = 0
         val_all_preds_phase = []
         val_all_labels_phase = []
 
+        print('\n Testing \n')
         with torch.no_grad():
-            for data in val_loader:
+            for data in tqdm(val_loader):
                 if use_gpu:
                     inputs, labels_phase = data[0].to(device), data[1].to(device)
                 else:
@@ -585,105 +592,25 @@ def train_model(train_dataset, train_num_each, val_dataset, val_num_each, args):
                 for i in range(len(labels_phase)):
                     val_all_labels_phase.append(int(labels_phase.data.cpu()[i]))
 
-                val_progress += 1
-                if val_progress * val_batch_size >= num_val_all:
-                    percent = 100.0
-                    print('Val progress: %s [%d/%d]' % (str(percent) + '%', num_val_all, num_val_all), end='\n')
-                else:
-                    percent = round(val_progress * val_batch_size / num_val_all * 100, 2)
-                    print('Val progress: %s [%d/%d]' % (str(percent) + '%', val_progress * val_batch_size, num_val_all),
-                          end='\r')
 
-        val_elapsed_time = time.time() - val_start_time
+
         val_accuracy_phase = float(val_corrects_phase) / float(num_val_we_use)
         val_average_loss_phase = val_loss_phase / num_val_we_use
 
         val_recall_phase = metrics.recall_score(val_all_labels_phase, val_all_preds_phase, average='macro')
         val_precision_phase = metrics.precision_score(val_all_labels_phase, val_all_preds_phase, average='macro')
         val_jaccard_phase = metrics.jaccard_score(val_all_labels_phase, val_all_preds_phase, average='macro')
-        val_precision_each_phase = metrics.precision_score(val_all_labels_phase, val_all_preds_phase, average=None)
-        val_recall_each_phase = metrics.recall_score(val_all_labels_phase, val_all_preds_phase, average=None)
+        val_f1_phase = metrics.f1_score(val_all_labels_phase, val_all_preds_phase, average='macro')
 
-        writer.add_scalar('validation acc epoch phase',
-                          float(val_accuracy_phase), epoch)
-        writer.add_scalar('validation loss epoch phase',
-                          float(val_average_loss_phase), epoch)
 
-        test_loss_phase = 0.0
-        test_corrects_phase = 0
-        test_start_time = time.time()
-        test_progress = 0
-        test_all_preds_phase = []
-        test_all_labels_phase = []
 
-        with torch.no_grad():
-            for data in test_loader:
-                if use_gpu:
-                    inputs, labels_phase = data[0].to(device), data[1].to(device)
-                else:
-                    inputs, labels_phase = data[0], data[1]
-
-                labels_phase = labels_phase[(sequence_length - 1)::sequence_length]
-
-                inputs = inputs.view(-1, sequence_length, 3, 224, 224)
-                outputs_phase = model.forward(inputs)
-                outputs_phase = outputs_phase[sequence_length - 1::sequence_length]
-
-                _, preds_phase = torch.max(outputs_phase.data, 1)
-                loss_phase = criterion_phase(outputs_phase, labels_phase)
-
-                test_loss_phase += loss_phase.data.item()
-
-                test_corrects_phase += torch.sum(preds_phase == labels_phase.data)
-                # TODO
-
-                for i in range(len(preds_phase)):
-                    test_all_preds_phase.append(int(preds_phase.data.cpu()[i]))
-                for i in range(len(labels_phase)):
-                    test_all_labels_phase.append(int(labels_phase.data.cpu()[i]))
-
-                test_progress += 1
-                if test_progress * val_batch_size >= num_test_all:
-                    percent = 100.0
-                    print('test progress: %s [%d/%d]' % (str(percent) + '%', num_test_all, num_test_all), end='\n')
-                else:
-                    percent = round(test_progress * val_batch_size / num_test_all * 100, 2)
-                    print('test progress: %s [%d/%d]' % (str(percent) + '%', test_progress * val_batch_size, num_test_all),
-                          end='\r')
-
-        test_elapsed_time = time.time() - test_start_time
-        test_accuracy_phase = float(test_corrects_phase) / float(num_test_we_use)
-        test_average_loss_phase = test_loss_phase / num_test_we_use
-
-        print('epoch: {:4d}'
-              ' train in: {:2.0f}m{:2.0f}s'
-              ' train loss(phase): {:4.4f}'
-              ' train accu(phase): {:.4f}'
-              ' valid in: {:2.0f}m{:2.0f}s'
-              ' valid loss(phase): {:4.4f}'
-              ' valid accu(phase): {:.4f}'
-              ' test in: {:2.0f}m{:2.0f}s'
-              ' test loss(phase): {:4.4f}'
-              ' test accu(phase): {:.4f}'
-              .format(epoch,
-                      train_elapsed_time // 60,
-                      train_elapsed_time % 60,
-                      train_average_loss_phase,
-                      train_accuracy_phase,
-                      val_elapsed_time // 60,
-                      val_elapsed_time % 60,
-                      val_average_loss_phase,
-                      val_accuracy_phase,
-                      test_elapsed_time // 60,
-                      test_elapsed_time % 60,
-                      test_average_loss_phase,
-                      test_accuracy_phase))
-
-        print("val_precision_each_phase:", val_precision_each_phase)
-        print("val_recall_each_phase:", val_recall_each_phase)
-        print("val_precision_phase", val_precision_phase)
-        print("val_recall_phase", val_recall_phase)
-        print("val_jaccard_phase", val_jaccard_phase)
+        wandb.log({
+            'Val accuracy': val_accuracy_phase,
+            'Val precision': val_precision_phase,
+            'Val recall': val_recall_phase,
+            'Val F1': val_f1_phase,
+            'Val Jaccard': val_jaccard_phase
+            })
 
         if optimizer_choice == 0:
             if sgd_adjust_lr == 0:
@@ -691,52 +618,30 @@ def train_model(train_dataset, train_num_each, val_dataset, val_num_each, args):
             elif sgd_adjust_lr == 1:
                 exp_lr_scheduler.step(val_average_loss_phase)
 
-        if val_accuracy_phase > best_val_accuracy_phase:
-            best_val_accuracy_phase = val_accuracy_phase
-            correspond_train_acc_phase = train_accuracy_phase
-            correspond_test_acc_phase = test_accuracy_phase
+        if val_f1_phase > best_val_f1_phase:
+            best_val_f1_phase = val_f1_phase
             best_model_wts = copy.deepcopy(model.module.state_dict())
             best_epoch = epoch
-        if val_accuracy_phase == best_val_accuracy_phase:
-            if train_accuracy_phase > correspond_train_acc_phase:
-                correspond_train_acc_phase = train_accuracy_phase
-                correspond_test_acc_phase = test_accuracy_phase
-                best_model_wts = copy.deepcopy(model.module.state_dict())
-                best_epoch = epoch
 
-        save_val_phase = int("{:4.0f}".format(best_val_accuracy_phase * 10000))
-        save_test_phase = int("{:4.0f}".format(correspond_test_acc_phase * 10000))
-        save_train_phase = int("{:4.0f}".format(correspond_train_acc_phase * 10000))
-        base_name = "resnetfc_ce" \
-                    + "_epoch_" + str(best_epoch) \
-                    + "_length_" + str(sequence_length) \
-                    + "_opt_" + str(optimizer_choice) \
-                    + "_mulopt_" + str(multi_optim) \
-                    + "_flip_" + str(use_flip) \
-                    + "_crop_" + str(crop_type) \
-                    + "_batch_" + str(train_batch_size) \
-                    + "_train_" + str(save_train_phase) \
-                    + "_val_" + str(save_val_phase) \
-                    + "_test_" + str(save_test_phase)
-        torch.save(best_model_wts, "./best_model/emd_lr5e-4/" + base_name + ".pth")
-        print("best_epoch", str(best_epoch))
+            os.makedirs(f'Resnet50_models/{args.dataset}', exist_ok=True)
+            base_name = f"Resnet50_models/{args.dataset}/resnetfc_ce_{epoch}_f1_{best_val_f1_phase}"
+            torch.save(best_model_wts, base_name + ".pth")
+            print("best_epoch", str(best_epoch))
 
-        #torch.save(model.module.state_dict(), "./temp/lr5e-4_do/latest_model_" + str(epoch) + ".pth")
 
 
 def main():
     # train_dataset_19, train_num_each_19, \
     train_dataset_80, train_num_each_80, \
-    val_dataset_80, val_num_each_80, \
-    test_dataset_80, test_num_each_80 = get_data('./train_val_paths_labels1.pkl')
-    train_model((train_dataset_80),
-                (train_num_each_80),
-                (val_dataset_80, test_dataset_80),
-                (val_num_each_80, test_num_each_80))
+    val_dataset_80, val_num_each_80  = get_data(f'pkl_datasets_files/train_val_paths_labels_{args.dataset}.pkl')
+    train_model(train_dataset_80,
+                train_num_each_80,
+                val_dataset_80,
+                val_num_each_80, args)
 
 
 if __name__ == "__main__":
     main()
 
 print('Done')
-print()
+

@@ -3,9 +3,6 @@
 
 import torch
 import torch.nn as nn
-import torch.optim as optim
-from torch.optim import lr_scheduler
-import torch.nn.init as init
 from torchvision import models, transforms
 from torch.utils.data import Dataset, DataLoader
 from torch.nn import DataParallel
@@ -13,7 +10,6 @@ from torch.utils.data import Sampler
 from PIL import Image, ImageOps
 import torchvision.transforms.functional as TF
 import torch.nn.functional as F
-import time
 import pickle
 import numpy as np
 from torchvision.transforms import Lambda
@@ -25,8 +21,24 @@ from torch.utils.tensorboard import SummaryWriter
 from sklearn import metrics
 #from NLBlock import NLBlockimport os, subprocess
 import os, subprocess
-os.environ['CUDA_VISIBLE_DEVICES'] = str(np.argmax([int(x.split()[2]) for x in subprocess.Popen(
-    "nvidia-smi -q -d Memory | grep -A4 GPU | grep Free", shell=True, stdout=subprocess.PIPE).stdout.readlines()]))
+from tqdm import tqdm
+import json
+
+# Seed everything
+seed = 19980125
+
+torch.manual_seed(seed)
+torch.cuda.manual_seed(seed)
+torch.cuda.manual_seed_all(seed)  # if you are using multi-GPU.
+np.random.seed(seed)  # Numpy module.
+random.seed(seed)  # Python random module.
+torch.manual_seed(seed)
+torch.backends.cudnn.benchmark = False
+torch.backends.cudnn.deterministic = True
+os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+torch.use_deterministic_algorithms(True)
+
+
 
 parser = argparse.ArgumentParser(description='lstm training')
 parser.add_argument('-g', '--gpu', default=True, type=bool, help='gpu use, default True')
@@ -36,7 +48,7 @@ parser.add_argument('-v', '--val', default=400, type=int, help='valid batch size
 parser.add_argument('-o', '--opt', default=0, type=int, help='0 for sgd 1 for adam, default 1')
 parser.add_argument('-m', '--multi', default=1, type=int, help='0 for single opt, 1 for multi opt, default 1')
 parser.add_argument('-e', '--epo', default=25, type=int, help='epochs to train and val, default 25')
-parser.add_argument('-w', '--work', default=8, type=int, help='num of workers to use, default 4')
+parser.add_argument('-w', '--work', default=1, type=int, help='num of workers to use, default 4')
 parser.add_argument('-f', '--flip', default=1, type=int, help='0 for not flip, 1 for flip, default 0')
 parser.add_argument('-c', '--crop', default=1, type=int, help='0 rand, 1 cent, 5 five_crop, 10 ten_crop, default 1')
 parser.add_argument('-l', '--lr', default=5e-7, type=float, help='learning rate for optimizer, default 5e-5')
@@ -49,6 +61,8 @@ parser.add_argument('--sgdstep', default=5, type=int, help='number of steps to a
 parser.add_argument('--sgdgamma', default=0.1, type=float, help='gamma of steps to adjust lr for sgd, default 0.1')
 parser.add_argument('--LFB_l', default=40, type=int, help='long term feature bank length')
 parser.add_argument('--load_LFB', default=False, type=bool, help='whether load exist long term feature bank')
+parser.add_argument('--dataset', default='Cholec80', type=str)
+
 
 args = parser.parse_args()
 
@@ -74,6 +88,18 @@ load_exist_LFB = args.load_LFB
 sgd_adjust_lr = args.sgdadjust
 sgd_step = args.sgdstep
 sgd_gamma = args.sgdgamma
+
+
+# Configure number of classes depending on dataset
+if args.dataset == 'HeiCo':
+    args.num_classes = 14
+
+elif args.dataset == 'M2CAI':
+    args.num_classes = 8
+
+else:
+    args.num_classes = 7
+
 
 num_gpu = torch.cuda.device_count()
 use_gpu = (torch.cuda.is_available() and gpu_usg)
@@ -190,18 +216,21 @@ class CholecDataset(Dataset):
     def __init__(self, file_paths, file_labels, transform=None,
                  loader=pil_loader):
         self.file_paths = file_paths
-        self.file_labels_phase = file_labels[:, 0]
+        self.file_labels_phase = file_labels
         self.transform = transform
         self.loader = loader
+        self.images_base_path = os.path.join('DATASETS', 'PHASES', 'frames')
+        
 
     def __getitem__(self, index):
-        img_names = self.file_paths[index]
+        img_names = os.path.join(self.images_base_path, self.file_paths[index])
         labels_phase = self.file_labels_phase[index]
         imgs = self.loader(img_names)
+        video_id = self.file_paths[index].split('/')[0]
         if self.transform is not None:
             imgs = self.transform(imgs)
 
-        return imgs, labels_phase, index
+        return imgs, labels_phase, index, video_id
 
     def __len__(self):
         return len(self.file_paths)
@@ -210,7 +239,7 @@ class CholecDataset(Dataset):
 
 
 class resnet_lstm(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, num_classes):
         super(resnet_lstm, self).__init__()
         resnet = models.resnet50(pretrained=True)
         self.share = torch.nn.Sequential()
@@ -223,27 +252,17 @@ class resnet_lstm(torch.nn.Module):
         self.share.add_module("layer3", resnet.layer3)
         self.share.add_module("layer4", resnet.layer4)
         self.share.add_module("avgpool", resnet.avgpool)
-        #self.lstm = nn.Linear(2048, 7)
         self.fc = nn.Sequential(nn.Linear(2048, 512),
                                 nn.ReLU(),
-                                nn.Linear(512, 7))
-        #self.dropout = nn.Dropout(p=0.2)
-        #self.relu = nn.ReLU()
+                                nn.Linear(512, num_classes))
 
-        #init.xavier_normal_(self.lstm.weight)
-        #init.xavier_normal_(self.lstm.all_weights[0][1])
-        #init.xavier_uniform_(self.fc.weight)
 
     def forward(self, x):
         x = x.view(-1, 3, 224, 224)
         x = self.share.forward(x)
         x = x.view(-1, 2048)
-        #self.lstm.flatten_parameters()
-        #y = self.relu(self.lstm(x))
-        #y = y.contiguous().view(-1, 256)
-        #y = self.dropout(y)
-        #x = self.fc(x)
         return x
+
 
 def get_useful_start_idx(sequence_length, list_each_length):
     count = 0
@@ -292,14 +311,20 @@ def get_data(data_path):
 
     train_paths_80 = train_test_paths_labels[0]
     val_paths_80 = train_test_paths_labels[1]
+
     train_labels_80 = train_test_paths_labels[2]
     val_labels_80 = train_test_paths_labels[3]
+
     train_num_each_80 = train_test_paths_labels[4]
     val_num_each_80 = train_test_paths_labels[5]
 
-    test_paths_80 = train_test_paths_labels[6]
-    test_labels_80 = train_test_paths_labels[7]
-    test_num_each_80 = train_test_paths_labels[8]
+    """train_num_each_80 = [train_test_paths_labels[4][0]]
+    val_num_each_80 = [train_test_paths_labels[5][0]]
+
+    train_paths_80 = train_test_paths_labels[0][:train_num_each_80[0]]
+    val_paths_80 = train_test_paths_labels[1][:val_num_each_80[0]]
+    train_labels_80 = train_test_paths_labels[2][:train_num_each_80[0]]
+    val_labels_80 = train_test_paths_labels[3][:val_num_each_80[0]]"""
 
 
     print('train_paths_80  : {:6d}'.format(len(train_paths_80)))
@@ -307,7 +332,7 @@ def get_data(data_path):
 
     train_labels_80 = np.asarray(train_labels_80, dtype=np.int64)
     val_labels_80 = np.asarray(val_labels_80, dtype=np.int64)
-    test_labels_80 = np.asarray(test_labels_80, dtype=np.int64)
+
 
     train_transforms = None
     test_transforms = None
@@ -375,10 +400,10 @@ def get_data(data_path):
     train_dataset_80 = CholecDataset(train_paths_80, train_labels_80, train_transforms)
     train_dataset_80_LFB = CholecDataset(train_paths_80, train_labels_80, test_transforms)
     val_dataset_80 = CholecDataset(val_paths_80, val_labels_80, test_transforms)
-    test_dataset_80 = CholecDataset(test_paths_80, test_labels_80, test_transforms)
+
 
     return (train_dataset_80, train_dataset_80_LFB), train_num_each_80, \
-           val_dataset_80, val_num_each_80, test_dataset_80, test_num_each_80
+           val_dataset_80, val_num_each_80
 
 
 # 序列采样sampler
@@ -401,45 +426,41 @@ sig_f = nn.Sigmoid()
 
 g_LFB_train = np.zeros(shape=(0, 2048))
 g_LFB_val = np.zeros(shape=(0, 2048))
-g_LFB_test = np.zeros(shape=(0, 2048))
-
-
 
 
 
 def train_model(train_dataset, train_num_each, val_dataset, val_num_each):
     # TensorBoard
-    writer = SummaryWriter('runs/non-local/pretrained_lr5e-7_L40_2fc_copy/')
 
     (train_num_each_80), \
-    (val_dataset, test_dataset), \
-    (val_num_each, test_num_each) = train_num_each, val_dataset, val_num_each
+    (val_dataset), \
+    (val_num_each) = train_num_each, val_dataset, val_num_each
 
     (train_dataset_80, train_dataset_80_LFB) = train_dataset
 
     train_useful_start_idx_80 = get_useful_start_idx(sequence_length, train_num_each_80)
     val_useful_start_idx = get_useful_start_idx(sequence_length, val_num_each)
-    test_useful_start_idx = get_useful_start_idx(sequence_length, test_num_each)
+
 
     train_useful_start_idx_80_LFB = get_useful_start_idx_LFB(sequence_length, train_num_each_80)
     val_useful_start_idx_LFB = get_useful_start_idx_LFB(sequence_length, val_num_each)
-    test_useful_start_idx_LFB = get_useful_start_idx_LFB(sequence_length, test_num_each)
+
 
     num_train_we_use_80 = len(train_useful_start_idx_80)
     num_val_we_use = len(val_useful_start_idx)
-    num_test_we_use = len(test_useful_start_idx)
+
 
     num_train_we_use_80_LFB = len(train_useful_start_idx_80_LFB)
     num_val_we_use_LFB = len(val_useful_start_idx_LFB)
-    num_test_we_use_LFB = len(test_useful_start_idx_LFB)
+
 
     train_we_use_start_idx_80 = train_useful_start_idx_80
     val_we_use_start_idx = val_useful_start_idx
-    test_we_use_start_idx = test_useful_start_idx
+
 
     train_we_use_start_idx_80_LFB = train_useful_start_idx_80_LFB
     val_we_use_start_idx_LFB = val_useful_start_idx_LFB
-    test_we_use_start_idx_LFB = test_useful_start_idx_LFB
+
 
     #    np.random.seed(0)
     # np.random.shuffle(train_we_use_start_idx)
@@ -453,10 +474,6 @@ def train_model(train_dataset, train_num_each, val_dataset, val_num_each):
         for j in range(sequence_length):
             val_idx.append(val_we_use_start_idx[i] + j)
 
-    test_idx = []
-    for i in range(num_test_we_use):
-        for j in range(sequence_length):
-            test_idx.append(test_we_use_start_idx[i] + j)
 
     train_idx_LFB = []
     for i in range(num_train_we_use_80_LFB):
@@ -468,10 +485,7 @@ def train_model(train_dataset, train_num_each, val_dataset, val_num_each):
         for j in range(sequence_length):
             val_idx_LFB.append(val_we_use_start_idx_LFB[i] + j)
 
-    test_idx_LFB = []
-    for i in range(num_test_we_use_LFB):
-        for j in range(sequence_length):
-            test_idx_LFB.append(test_we_use_start_idx_LFB[i] + j)
+
 
     dict_index, dict_value = zip(*list(enumerate(train_we_use_start_idx_80_LFB)))
     dict_train_start_idx_LFB = dict(zip(dict_value, dict_index))
@@ -481,19 +495,17 @@ def train_model(train_dataset, train_num_each, val_dataset, val_num_each):
 
     num_train_all = len(train_idx)
     num_val_all = len(val_idx)
-    num_test_all = len(test_idx)
+
 
     print('num train start idx 80: {:6d}'.format(len(train_useful_start_idx_80)))
     print('num of all train use: {:6d}'.format(num_train_all))
     print('num of all valid use: {:6d}'.format(num_val_all))
-    print('num of all test use: {:6d}'.format(num_test_all))
     print('num of all train LFB use: {:6d}'.format(len(train_idx_LFB)))
     print('num of all valid LFB use: {:6d}'.format(len(val_idx_LFB)))
 
 
     global g_LFB_train
     global g_LFB_val
-    global g_LFB_test
     print("loading features!>.........")
 
     if not load_exist_LFB:
@@ -513,17 +525,12 @@ def train_model(train_dataset, train_num_each, val_dataset, val_num_each):
             pin_memory=False
         )
 
-        test_feature_loader = DataLoader(
-            test_dataset,
-            batch_size=val_batch_size,
-            sampler=SeqSampler(test_dataset, test_idx_LFB),
-            num_workers=workers,
-            pin_memory=False
-        )
+        
 
-        model_LFB = resnet_lstm()
+        model_LFB = resnet_lstm(args.num_classes)
 
-        model_LFB.load_state_dict(torch.load("./best_model/emd_lr5e-4/resnetfc_ce_epoch_15_length_1_opt_0_mulopt_1_flip_1_crop_1_batch_100_train_9946_val_8404_test_7961.pth"), strict=False)
+        model_LFB.load_state_dict(torch.load(f"Resnet50_models/{args.dataset}/resnetfc_ce_best_model.pth"), strict=False)
+
         def get_parameter_number(net):
             total_num = sum(p.numel() for p in net.parameters())
             trainable_num = sum(p.numel() for p in net.parameters() if p.requires_grad)
@@ -542,9 +549,13 @@ def train_model(train_dataset, train_num_each, val_dataset, val_num_each):
 
         model_LFB.eval()
 
+        train_video_ids = []
+        valid_video_ids = []
+
         with torch.no_grad():
             #'''
-            for data in train_feature_loader:
+            for data in tqdm(train_feature_loader):
+                
                 if use_gpu:
                     inputs, labels_phase = data[0].to(device), data[1].to(device)
                 else:
@@ -555,10 +566,11 @@ def train_model(train_dataset, train_num_each, val_dataset, val_num_each):
 
                 g_LFB_train = np.concatenate((g_LFB_train, outputs_feature), axis=0)
 
+                
+                # Add video names to the general list
+                train_video_ids.extend(list(data[3]))
 
-                print("train feature length:", len(g_LFB_train))
-
-            for data in val_feature_loader:
+            for data in tqdm(val_feature_loader):
                 if use_gpu:
                     inputs, labels_phase = data[0].to(device), data[1].to(device)
                 else:
@@ -569,45 +581,40 @@ def train_model(train_dataset, train_num_each, val_dataset, val_num_each):
 
                 g_LFB_val = np.concatenate((g_LFB_val, outputs_feature), axis=0)
 
-
-                print("val feature length:", len(g_LFB_val))
             #'''
-            for data in test_feature_loader:
-                if use_gpu:
-                    inputs, labels_phase = data[0].to(device), data[1].to(device)
-                else:
-                    inputs, labels_phase = data[0], data[1]
-
-                inputs = inputs.view(-1, sequence_length, 3, 224, 224)
-                outputs_feature = model_LFB.forward(inputs).data.cpu().numpy()
-
-                g_LFB_test = np.concatenate((g_LFB_test, outputs_feature), axis=0)
-
-                print("test feature length:", len(g_LFB_test))
+                # Add video names to the general list
+                valid_video_ids.extend(list(data[3]))
 
         print("finish!")
         g_LFB_train = np.array(g_LFB_train)
         g_LFB_val = np.array(g_LFB_val)
-        g_LFB_test = np.array(g_LFB_test)
+        
         #'''
-        with open("./LFB/g_LFB50_train0.pkl", 'wb') as f:
+        os.makedirs(f'LFB/{args.dataset}', exist_ok=True)
+        with open(f'LFB/{args.dataset}/g_LFB50_train.pkl', 'wb') as f:
             pickle.dump(g_LFB_train, f)
 
-        with open("./LFB/g_LFB50_val0.pkl", 'wb') as f:
+        with open(f'LFB/{args.dataset}/g_LFB50_val.pkl', 'wb') as f:
             pickle.dump(g_LFB_val, f)
         #'''
-        with open("./LFB/g_LFB50_test0.pkl", 'wb') as f:
-            pickle.dump(g_LFB_test, f)
 
+        # Save video ids lists
+        video_ids = {'Train': train_video_ids, 'Valid': valid_video_ids}
+
+        os.makedirs(f"Video_ids/{args.dataset}", exist_ok=True)
+        with open(f"Video_ids/{args.dataset}/video_numbers.json", "w") as f:
+            json.dump(video_ids, f, indent=4)
 
 
 def main():
+
     train_dataset_80, train_num_each_80, \
-    val_dataset, val_num_each, test_dataset, test_num_each = get_data('./train_val_paths_labels1.pkl')
+    val_dataset, val_num_each = get_data(f'pkl_datasets_files/train_val_paths_labels_{args.dataset}.pkl')
+
     train_model((train_dataset_80),
                 (train_num_each_80),
-                (val_dataset, test_dataset),
-                (val_num_each, test_num_each))
+                (val_dataset),
+                (val_num_each))
 
 
 if __name__ == "__main__":

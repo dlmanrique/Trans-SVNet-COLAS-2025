@@ -13,8 +13,7 @@ import mstcn
 from transformer2_3_1 import Transformer2_3_1
 import os, subprocess
 
-os.environ['CUDA_VISIBLE_DEVICES'] = str(np.argmax([int(x.split()[2]) for x in subprocess.Popen(
-    "nvidia-smi -q -d Memory | grep -A4 GPU | grep Free", shell=True, stdout=subprocess.PIPE).stdout.readlines()]))
+
 
 def get_data(data_path):
     with open(data_path, 'rb') as f:
