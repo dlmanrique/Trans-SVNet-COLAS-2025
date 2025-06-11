@@ -5,14 +5,13 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.optim import lr_scheduler
-import torch.nn.init as init
 from torchvision import models, transforms
 from torch.utils.data import Dataset, DataLoader
 from torch.nn import DataParallel
 from torch.utils.data import Sampler
 from PIL import Image, ImageOps
 import torchvision.transforms.functional as TF
-import torch.nn.functional as F
+import os
 import time
 import pickle
 import numpy as np
@@ -23,15 +22,36 @@ import random
 import numbers
 from torch.utils.tensorboard import SummaryWriter
 from sklearn import metrics
+import wandb
+from datetime import datetime
+
+
+# Seed everything
+seed = 19980125
+
+torch.manual_seed(seed)
+torch.cuda.manual_seed(seed)
+torch.cuda.manual_seed_all(seed)  # if you are using multi-GPU.
+np.random.seed(seed)  # Numpy module.
+random.seed(seed)  # Python random module.
+torch.manual_seed(seed)
+torch.backends.cudnn.benchmark = False
+torch.backends.cudnn.deterministic = True
+os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+torch.use_deterministic_algorithms(True)
+
+
+
+breakpoint()
 
 parser = argparse.ArgumentParser(description='lstm training')
 parser.add_argument('-g', '--gpu', default=True, type=bool, help='gpu use, default True')
 parser.add_argument('-s', '--seq', default=1, type=int, help='sequence length, default 10')
-parser.add_argument('-t', '--train', default=100, type=int, help='train batch size, default 400')
-parser.add_argument('-v', '--val', default=100, type=int, help='valid batch size, default 10')
+parser.add_argument('-t', '--train', default=400, type=int, help='train batch size, default 400')
+parser.add_argument('-v', '--val', default=400, type=int, help='valid batch size, default 10')
 parser.add_argument('-o', '--opt', default=0, type=int, help='0 for sgd 1 for adam, default 1')
 parser.add_argument('-m', '--multi', default=1, type=int, help='0 for single opt, 1 for multi opt, default 1')
-parser.add_argument('-e', '--epo', default=20, type=int, help='epochs to train and val, default 25')
+parser.add_argument('-e', '--epo', default=25, type=int, help='epochs to train and val, default 25')
 parser.add_argument('-w', '--work', default=8, type=int, help='num of workers to use, default 4')
 parser.add_argument('-f', '--flip', default=1, type=int, help='0 for not flip, 1 for flip, default 0')
 parser.add_argument('-c', '--crop', default=1, type=int, help='0 rand, 1 cent, 5 five_crop, 10 ten_crop, default 1')
@@ -69,6 +89,17 @@ sgd_gamma = args.sgdgamma
 num_gpu = torch.cuda.device_count()
 use_gpu = (torch.cuda.is_available() and gpu_usg)
 device = torch.device("cuda:0" if use_gpu else "cpu")
+
+# Configure wandb
+exp_name = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+
+wandb.init(
+    project='Resnet_encoder-COLAS2025', 
+    entity = 'endovis_bcv',
+    config=vars(args), 
+    name=exp_name
+    )
+
 
 print('number of gpu   : {:6d}'.format(num_gpu))
 print('sequence length : {:6d}'.format(sequence_length))
@@ -199,7 +230,7 @@ class CholecDataset(Dataset):
 
 
 class resnet_lstm(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, num_classes):
         super(resnet_lstm, self).__init__()
         resnet = models.resnet50(pretrained=True)
         self.share = torch.nn.Sequential()
@@ -212,25 +243,15 @@ class resnet_lstm(torch.nn.Module):
         self.share.add_module("layer3", resnet.layer3)
         self.share.add_module("layer4", resnet.layer4)
         self.share.add_module("avgpool", resnet.avgpool)
-        #self.lstm = nn.Linear(2048, 7)
         self.fc = nn.Sequential(nn.Linear(2048, 512),
                                 nn.ReLU(),
-                                nn.Linear(512, 7))
-        #self.dropout = nn.Dropout(p=0.2)
-        #self.relu = nn.ReLU()
+                                nn.Linear(512, num_classes))
 
-        #init.xavier_normal_(self.lstm.weight)
-        #init.xavier_normal_(self.lstm.all_weights[0][1])
-        #init.xavier_uniform_(self.fc.weight)
 
     def forward(self, x):
         x = x.view(-1, 3, 224, 224)
         x = self.share.forward(x)
         x = x.view(-1, 2048)
-        #self.lstm.flatten_parameters()
-        #y = self.relu(self.lstm(x))
-        #y = y.contiguous().view(-1, 256)
-        #y = self.dropout(y)
         y = self.fc(x)
         return y
 
