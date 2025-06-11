@@ -24,6 +24,7 @@ from torch.utils.tensorboard import SummaryWriter
 from sklearn import metrics
 import wandb
 from datetime import datetime
+from tqdm import tqdm
 
 
 # Seed everything
@@ -269,33 +270,28 @@ def get_useful_start_idx(sequence_length, list_each_length):
 def get_data(data_path):
     with open(data_path, 'rb') as f:
         train_test_paths_labels = pickle.load(f)
-    # train_paths_19 = train_test_paths_labels[0]
+
     train_paths_80 = train_test_paths_labels[0]
     val_paths_80 = train_test_paths_labels[1]
-    # train_labels_19 = train_test_paths_labels[3]
+
     train_labels_80 = train_test_paths_labels[2]
     val_labels_80 = train_test_paths_labels[3]
-    # train_num_each_19 = train_test_paths_labels[6]
+
     train_num_each_80 = train_test_paths_labels[4]
     val_num_each_80 = train_test_paths_labels[5]
 
-    test_paths_80 = train_test_paths_labels[6]
-    test_labels_80 = train_test_paths_labels[7]
-    test_num_each_80 = train_test_paths_labels[8]
 
-    # print('train_paths_19  : {:6d}'.format(len(train_paths_19)))
-    # print('train_labels_19 : {:6d}'.format(len(train_labels_19)))
+
     print('train_paths_80  : {:6d}'.format(len(train_paths_80)))
     print('train_labels_80 : {:6d}'.format(len(train_labels_80)))
     print('valid_paths_80  : {:6d}'.format(len(val_paths_80)))
     print('valid_labels_80 : {:6d}'.format(len(val_labels_80)))
-    print('test_paths_80  : {:6d}'.format(len(test_paths_80)))
-    print('test_labels_80 : {:6d}'.format(len(test_labels_80)))
+
 
     # train_labels_19 = np.asarray(train_labels_19, dtype=np.int64)
     train_labels_80 = np.asarray(train_labels_80, dtype=np.int64)
     val_labels_80 = np.asarray(val_labels_80, dtype=np.int64)
-    test_labels_80 = np.asarray(test_labels_80, dtype=np.int64)
+
 
     train_transforms = None
     test_transforms = None
@@ -309,6 +305,9 @@ def get_data(data_path):
             transforms.Normalize([0.41757566, 0.26098573, 0.25888634], [0.21938758, 0.1983, 0.19342837])
         ])
     elif use_flip == 1:
+        #Entramos aca y eso es lo mismo que reportan en el paper
+        # data augmentation is applied, including 224×224 cropping, random mirroring, and color jittering.
+
         train_transforms = transforms.Compose([
             transforms.Resize((250, 250)),
             RandomCrop(224),
@@ -363,12 +362,12 @@ def get_data(data_path):
     # train_dataset_19 = CholecDataset(train_paths_19, train_labels_19, train_transforms)
     train_dataset_80 = CholecDataset(train_paths_80, train_labels_80, train_transforms)
     val_dataset_80 = CholecDataset(val_paths_80, val_labels_80, test_transforms)
-    test_dataset_80 = CholecDataset(test_paths_80, test_labels_80, test_transforms)
-
-    return train_dataset_80, train_num_each_80, val_dataset_80, val_num_each_80, test_dataset_80, test_num_each_80
 
 
-# 序列采样sampler
+    return train_dataset_80, train_num_each_80, val_dataset_80, val_num_each_80
+
+
+
 class SeqSampler(Sampler):
     def __init__(self, data_source, idx):
         super().__init__(data_source)
@@ -385,60 +384,31 @@ class SeqSampler(Sampler):
 sig_f = nn.Sigmoid()
 
 
-def valMinibatch(testloader, model):
-    model.eval()
-    criterion_phase = nn.CrossEntropyLoss(size_average=False)
-    with torch.no_grad():
-        val_loss_phase = 0.0
-        val_corrects_phase = 0.0
-        for data in testloader:
-            if use_gpu:
-                inputs, labels_phase = data[0].to(device), data[1].to(device)
-            else:
-                inputs, labels_phase = data[0], data[1]
-
-            labels_phase = labels_phase[(sequence_length - 1)::sequence_length]
-
-            inputs = inputs.view(-1, sequence_length, 3, 224, 224)
-            outputs_phase = model.forward(inputs)
-            outputs_phase = outputs_phase[sequence_length - 1::sequence_length]
-
-            _, preds_phase = torch.max(outputs_phase.data, 1)
-            loss_phase = criterion_phase(outputs_phase, labels_phase)
-
-            val_loss_phase += loss_phase.data.item()
-            val_corrects_phase += torch.sum(preds_phase == labels_phase.data)
-
-    model.train()
-    return val_loss_phase, val_corrects_phase
+# Deleted Val mini batch function
 
 
-def train_model(train_dataset, train_num_each, val_dataset, val_num_each):
+def train_model(train_dataset, train_num_each, val_dataset, val_num_each, args):
     # TensorBoard
     writer = SummaryWriter('runs/emd_lr5e-4/')
 
-    (train_dataset_80), \
-    (train_num_each_80), \
-    (val_dataset, test_dataset), \
-    (val_num_each, test_num_each) = train_dataset, train_num_each, val_dataset, val_num_each
+    train_dataset_80, \
+    train_num_each_80, \
+    val_dataset, \
+    val_num_each = train_dataset, train_num_each, val_dataset, val_num_each
 
     # train_useful_start_idx_19 = get_useful_start_idx(sequence_length, train_num_each_19)
     train_useful_start_idx_80 = get_useful_start_idx(sequence_length, train_num_each_80)
     val_useful_start_idx = get_useful_start_idx(sequence_length, val_num_each)
-    test_useful_start_idx = get_useful_start_idx(sequence_length, test_num_each)
 
-    # num_train_we_use_19 = len(train_useful_start_idx_19)
+
     num_train_we_use_80 = len(train_useful_start_idx_80)
     num_val_we_use = len(val_useful_start_idx)
-    num_test_we_use = len(test_useful_start_idx)
 
-    # train_we_use_start_idx_19 = train_useful_start_idx_19
+
     train_we_use_start_idx_80 = train_useful_start_idx_80
     val_we_use_start_idx = val_useful_start_idx
-    test_we_use_start_idx = test_useful_start_idx
 
-    #    np.random.seed(0)
-    # np.random.shuffle(train_we_use_start_idx)
+
     train_idx = []
     for i in range(num_train_we_use_80):
         for j in range(sequence_length):
@@ -449,20 +419,14 @@ def train_model(train_dataset, train_num_each, val_dataset, val_num_each):
         for j in range(sequence_length):
             val_idx.append(val_we_use_start_idx[i] + j)
 
-    test_idx = []
-    for i in range(num_test_we_use):
-        for j in range(sequence_length):
-            test_idx.append(test_we_use_start_idx[i] + j)
 
     num_train_all = len(train_idx)
     num_val_all = len(val_idx)
-    num_test_all = len(test_idx)
 
     # print('num train start idx 19: {:6d}'.format(len(train_useful_start_idx_19)))
     print('num train start idx 80: {:6d}'.format(len(train_useful_start_idx_80)))
     print('num of all train use: {:6d}'.format(num_train_all))
     print('num of all valid use: {:6d}'.format(num_val_all))
-    print('num of all test use: {:6d}'.format(num_test_all))
 
     val_loader = DataLoader(
         val_dataset,
@@ -472,20 +436,14 @@ def train_model(train_dataset, train_num_each, val_dataset, val_num_each):
         pin_memory=False
     )
 
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=val_batch_size,
-        sampler=SeqSampler(test_dataset, test_idx),
-        num_workers=workers,
-        pin_memory=False
-    )
 
-    model = resnet_lstm()
+    model = resnet_lstm(args.num_classes)
 
     if use_gpu:
         model = DataParallel(model)
         model.to(device)
-    #criterion_phase = nn.CrossEntropyLoss(size_average=False, weight=torch.from_numpy(weights_train).float().to(device))
+
+    
     criterion_phase = nn.CrossEntropyLoss(size_average=False)
     optimizer = None
     exp_lr_scheduler = None
@@ -524,10 +482,12 @@ def train_model(train_dataset, train_num_each, val_dataset, val_num_each):
     correspond_train_acc_phase = 0.0
     best_epoch = 0
 
-    for epoch in range(epochs):
+    for epoch in tqdm(range(epochs)):
+
         torch.cuda.empty_cache()
         np.random.shuffle(train_we_use_start_idx_80)
         train_idx_80 = []
+
         for i in range(num_train_we_use_80):
             for j in range(sequence_length):
                 train_idx_80.append(train_we_use_start_idx_80[i] + j)
@@ -548,6 +508,7 @@ def train_model(train_dataset, train_num_each, val_dataset, val_num_each):
         running_loss_phase = 0.0
         minibatch_correct_phase = 0.0
         train_start_time = time.time()
+
         for i, data in enumerate(train_loader_80):
             optimizer.zero_grad()
             if use_gpu:
@@ -575,32 +536,6 @@ def train_model(train_dataset, train_num_each, val_dataset, val_num_each):
             train_corrects_phase += batch_corrects_phase
             minibatch_correct_phase += batch_corrects_phase
 
-            if i % 1500 == 1499:
-                # ...log the running loss
-                batch_iters = epoch * num_train_all / sequence_length + i * train_batch_size / sequence_length
-                writer.add_scalar('training loss phase',
-                                  running_loss_phase / (train_batch_size * 500 / sequence_length),
-                                  batch_iters)
-                # ...log the training acc
-                writer.add_scalar('training acc phase',
-                                  float(minibatch_correct_phase) / (float(train_batch_size) * 500 / sequence_length),
-                                  batch_iters)
-                # ...log the val acc loss
-
-                val_loss_phase, val_corrects_phase = valMinibatch(val_loader, model)
-                writer.add_scalar('validation acc miniBatch phase',
-                                  float(val_corrects_phase) / float(num_val_we_use),
-                                  batch_iters)
-                writer.add_scalar('validation loss miniBatch phase',
-                                  float(val_loss_phase) / float(num_val_we_use),
-                                  batch_iters)
-
-                running_loss_phase = 0.0
-                minibatch_correct_phase = 0.0
-
-            if (i + 1) * train_batch_size >= num_train_all:
-                running_loss_phase = 0.0
-                minibatch_correct_phase = 0.0
 
             batch_progress += 1
             if batch_progress * train_batch_size >= num_train_all:
