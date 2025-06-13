@@ -11,8 +11,66 @@ from sklearn import metrics
 import copy
 import mstcn
 from transformer2_3_1 import Transformer2_3_1
-import os, subprocess
+from evaluation_relaxed_metrics import relaxed_evaluation_M2CAI, relaxed_evaluation_Cholec80
 
+import wandb
+import argparse
+import os
+from tqdm import tqdm
+
+
+seed = 1
+print("Random Seed: ", seed)
+random.seed(seed)
+np.random.seed(seed)
+torch.manual_seed(seed)
+torch.cuda.manual_seed_all(seed)
+
+num_gpu = torch.cuda.device_count()
+use_gpu = torch.cuda.is_available()
+device = torch.device("cuda:0" if use_gpu else "cpu")
+
+parser = argparse.ArgumentParser(description="Training script for gene expression prediction.")
+parser.add_argument("--dataset", type=str, default=None, help="Nombre del dataset")
+parser.add_argument("--out_features", type=int, default=7, help="Number of output features.")
+parser.add_argument("--num_workers", type=int, default=3, help="Number of workers for data loading.")
+parser.add_argument("--batch_size", type=int, default=1, help="Batch size for training.")
+parser.add_argument("--mstcn_causal_conv", type=lambda x: x.lower() == 'true', default=True, help="Use causal convolution in MS-TCN.")
+parser.add_argument("--learning_rate", type=float, default=1e-3, help="Learning rate for optimization.")
+parser.add_argument("--max_epochs", type=int, default=25, help="Maximum number of training epochs.")
+parser.add_argument("--mstcn_layers", type=int, default=8, help="Number of layers in MS-TCN.")
+parser.add_argument("--mstcn_f_maps", type=int, default=32, help="Feature maps in MS-TCN.")
+parser.add_argument("--mstcn_f_dim", type=int, default=2048, help="Feature dimension in MS-TCN.")
+parser.add_argument("--mstcn_stages", type=int, default=2, help="Number of stages in MS-TCN.")
+parser.add_argument("--sequence_length", type=int, default=30, help="Length of the input sequence.")
+
+args = parser.parse_args()
+
+if args.dataset == 'M2CAI':
+    args.num_classes = 8
+elif args.dataset == 'HeiCo':
+    args.num_classes = 14
+else:
+    args.num_classes = 7
+
+
+# Inicializar W&B con los argumentos como configuración
+current_time = time.localtime()
+
+wandb.init(
+    project="Transvnet-COLAS 2025",
+    entity='endovis_bcv', 
+    name=time.strftime("%Y-%m-%d %H:%M:%S", current_time),
+    config=vars(args) # Guarda todos los argumentos en wandb.config
+)
+
+dataset = args.dataset
+
+num_videos_dataset = {'Autolaparo': [10, 4],
+                      'Cholec80': [40, 40],
+                      'HeiChole': [16, 8],
+                      'HeiCo': [21, 9],
+                      'M2CAI': [27, 14]}
 
 
 def get_data(data_path):
@@ -28,12 +86,15 @@ def get_data(data_path):
     train_num_each_80 = train_test_paths_labels[4]
     val_num_each_80 = train_test_paths_labels[5]
 
-    test_paths_80 = train_test_paths_labels[6]
-    test_labels_80 = train_test_paths_labels[7]
-    test_num_each_80 = train_test_paths_labels[8]
+    """train_num_each_80 = [train_test_paths_labels[4][0]]
+    val_num_each_80 = [train_test_paths_labels[5][0]]
 
-    # print('train_paths_19  : {:6d}'.format(len(train_paths_19)))
-    # print('train_labels_19 : {:6d}'.format(len(train_labels_19)))
+    train_paths_80 = train_test_paths_labels[0][:train_num_each_80[0]]
+    val_paths_80 = train_test_paths_labels[1][:val_num_each_80[0]]
+    train_labels_80 = train_test_paths_labels[2][:train_num_each_80[0]]
+    val_labels_80 = train_test_paths_labels[3][:val_num_each_80[0]]"""
+
+
     print('train_paths_80  : {:6d}'.format(len(train_paths_80)))
     print('train_labels_80 : {:6d}'.format(len(train_labels_80)))
     print('valid_paths_80  : {:6d}'.format(len(val_paths_80)))
@@ -55,14 +116,8 @@ def get_data(data_path):
         val_start_vidx.append(count)
         count += val_num_each_80[i]
 
-    test_start_vidx = []
-    count = 0
-    for i in range(len(test_num_each_80)):
-        test_start_vidx.append(count)
-        count += test_num_each_80[i]
+    return train_labels_80, train_num_each_80, train_start_vidx, val_labels_80, val_num_each_80, val_start_vidx
 
-    return train_labels_80, train_num_each_80, train_start_vidx, val_labels_80, val_num_each_80, val_start_vidx,\
-           test_labels_80, test_num_each_80, test_start_vidx
 
 def get_long_feature(start_index, lfb, LFB_length):
     long_feature = []
@@ -76,8 +131,7 @@ def get_long_feature(start_index, lfb, LFB_length):
     return long_feature
 
 train_labels_80, train_num_each_80, train_start_vidx,\
-    val_labels_80, val_num_each_80, val_start_vidx,\
-    test_labels_80, test_num_each_80, test_start_vidx = get_data('./train_val_paths_labels1.pkl')
+    val_labels_80, val_num_each_80, val_start_vidx = get_data(f'pkl_datasets_files/train_val_paths_labels_{dataset}.pkl')
 
 
 class Transformer(nn.Module):
@@ -88,8 +142,9 @@ class Transformer(nn.Module):
         self.num_classes = out_features  # 7
         self.len_q = len_q
 
+
         self.transformer = Transformer2_3_1(d_model=out_features, d_ff=mstcn_f_maps, d_k=mstcn_f_maps,
-                                        d_v=mstcn_f_maps, n_layers=1, n_heads=8, len_q = sequence_length)
+                                        d_v=mstcn_f_maps, n_layers=1, n_heads=8, len_q = len_q)
         self.fc = nn.Linear(mstcn_f_dim, out_features, bias=False)
 
 
@@ -106,82 +161,57 @@ class Transformer(nn.Module):
         inputs = torch.stack(inputs, dim=0).squeeze(1)
         feas = torch.tanh(self.fc(long_feature).transpose(0,1))
         output = self.transformer(inputs, feas)
-        #output = output.transpose(1,2)
-        #output = self.fc(output)
+
         return output
 
 
-with open("./LFB/g_LFB50_train.pkl", 'rb') as f:
+
+with open(f"LFB/{args.dataset}/g_LFB50_train.pkl", 'rb') as f:
     g_LFB_train = pickle.load(f)
 
-with open("./LFB/g_LFB50_val.pkl", 'rb') as f:
+with open(f"LFB/{args.dataset}/g_LFB50_val.pkl", 'rb') as f:
     g_LFB_val = pickle.load(f)
 
-with open("./LFB/g_LFB50_test.pkl", 'rb') as f:
-    g_LFB_test = pickle.load(f)
 
 print("load completed")
 
 print("g_LFB_train shape:", g_LFB_train.shape)
 print("g_LFB_val shape:", g_LFB_val.shape)
 
-out_features = 7
-num_workers = 3
-batch_size = 1
-mstcn_causal_conv = True
-learning_rate = 1e-3
-min_epochs = 12
-max_epochs = 25
-mstcn_layers = 8
-mstcn_f_maps = 32
-mstcn_f_dim= 2048
-mstcn_stages = 2
 
-sequence_length = 30
-
-seed = 1
-print("Random Seed: ", seed)
-random.seed(seed)
-np.random.seed(seed)
-torch.manual_seed(seed)
-torch.cuda.manual_seed_all(seed)
-
-num_gpu = torch.cuda.device_count()
-use_gpu = torch.cuda.is_available()
-device = torch.device("cuda:0" if use_gpu else "cpu")
-
-weights_train = np.asarray([1.6411019141231247,
-            0.19090963801041133,
-            1.0,
-            0.2502662616859295,
-            1.9176363911137977,
-            0.9840248158200853,
-            2.174635818337618,])
-
-criterion_phase = nn.CrossEntropyLoss(weight=torch.from_numpy(weights_train).float().to(device))
 criterion_phase1 = nn.CrossEntropyLoss()
 
-model = mstcn.MultiStageModel(mstcn_stages, mstcn_layers, mstcn_f_maps, mstcn_f_dim, out_features, mstcn_causal_conv)
-model_path = './best_model/TeCNO/'
-model_name = 'TeCNO50_epoch_6_train_9935_val_8924_test_8603'
-model.load_state_dict(torch.load(model_path+model_name+'.pth'))
+model = mstcn.MultiStageModel(args.mstcn_stages, args.mstcn_layers, args.mstcn_f_maps,
+                            args.mstcn_f_dim, args.out_features, args.mstcn_causal_conv)
+
+breakpoint()
+model_path = f'TeCNO50_models/{args.dataset}/'
+model_name = 'TeCNO50_best_model.pth'
+
+model.load_state_dict(torch.load(model_path+model_name))
 model.cuda()
 model.eval()
 
-model1 = Transformer(mstcn_f_maps, mstcn_f_dim, out_features, sequence_length)
+model1 = Transformer(args.mstcn_f_maps, args.mstcn_f_dim, args.out_features, args.sequence_length)
 model1.cuda()
-#optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-optimizer1 = optim.Adam(model1.parameters(), lr=learning_rate)
+
+optimizer1 = optim.Adam(model1.parameters(), lr=args.learning_rate)
 
 best_model_wts = copy.deepcopy(model1.state_dict())
-best_val_accuracy_phase = 0.0
+best_val_fscore_phase = 0.0
 correspond_train_acc_phase = 0.0
 best_epoch = 0
 
-train_we_use_start_idx_80 = [x for x in range(40)]
-val_we_use_start_idx_80 = [x for x in range(8)]
-test_we_use_start_idx_80 = [x for x in range(32)]
-for epoch in range(max_epochs):
+train_we_use_start_idx_80 = [x for x in range(num_videos_dataset[dataset][0])]
+val_we_use_start_idx_80 = [x for x in range(num_videos_dataset[dataset][1])]
+
+#Information used for saving the id of each prediction and perform relaxed evaluation,
+#  its added to the video_id used in validation loop
+gap_for_dataset = {'Cholec80': 62,
+                   'M2CAI': 183}
+
+for epoch in tqdm(range(args.max_epochs)):
+
     torch.cuda.empty_cache()
     random.shuffle(train_we_use_start_idx_80)
     train_idx_80 = []
@@ -191,13 +221,13 @@ for epoch in range(max_epochs):
     batch_progress = 0.0
     running_loss_phase = 0.0
     minibatch_correct_phase = 0.0
-    train_start_time = time.time()
-    for i in train_we_use_start_idx_80:
-        #optimizer.zero_grad()
+
+    for i in tqdm(train_we_use_start_idx_80):
+
         optimizer1.zero_grad()
         labels_phase = []
         for j in range(train_start_vidx[i], train_start_vidx[i]+train_num_each_80[i]):
-            labels_phase.append(train_labels_80[j][0])
+            labels_phase.append(train_labels_80[j])
         labels_phase = torch.LongTensor(labels_phase)
         if use_gpu:
             labels_phase = labels_phase.to(device)
@@ -209,23 +239,21 @@ for epoch in range(max_epochs):
 
         long_feature = (torch.Tensor(long_feature)).to(device)
         video_fe = long_feature.transpose(2, 1)
-        # print(long_feature.size())
+
 
         out_features = model.forward(video_fe)[-1]
         out_features = out_features.squeeze(1)
         p_classes1 = model1(out_features.detach(), long_feature)
 
-        #p_classes = y_classes.squeeze().transpose(1, 0)
-        #clc_loss = criterion_phase(p_classes, labels_phase)
+
         p_classes1 = p_classes1.squeeze()
         clc_loss = criterion_phase1(p_classes1, labels_phase)
 
         _, preds_phase = torch.max(p_classes1.data, 1)
 
         loss = clc_loss
-        #print(loss.data.cpu().numpy())
+
         loss.backward()
-        #optimizer.step()
         optimizer1.step()
 
         running_loss_phase += clc_loss.data.item()
@@ -235,17 +263,9 @@ for epoch in range(max_epochs):
         train_corrects_phase += batch_corrects_phase
         minibatch_correct_phase += batch_corrects_phase
 
-        batch_progress += 1
-        if batch_progress * batch_size >= len(train_we_use_start_idx_80):
-            percent = 100.0
-            print('Batch progress: %s [%d/%d]' % (str(percent) + '%', len(train_we_use_start_idx_80),
-                                                  len(train_we_use_start_idx_80)), end='\n')
-        else:
-            percent = round(batch_progress * batch_size / len(train_we_use_start_idx_80) * 100, 2)
-            print('Batch progress: %s [%d/%d]' % (
-                str(percent) + '%', batch_progress * batch_size, len(train_we_use_start_idx_80)), end='\r')
+        wandb.log({"Train_loss": clc_loss.data.item()})
+        
 
-    train_elapsed_time = time.time() - train_start_time
     train_accuracy_phase = float(train_corrects_phase) / len(train_labels_80)
     train_average_loss_phase = train_loss_phase
 
@@ -254,17 +274,19 @@ for epoch in range(max_epochs):
     model1.eval()
     val_loss_phase = 0.0
     val_corrects_phase = 0
-    val_start_time = time.time()
     val_progress = 0
     val_all_preds_phase = []
     val_all_labels_phase = []
     val_acc_each_video = []
+    video_names = []
 
     with torch.no_grad():
-        for i in val_we_use_start_idx_80:
+
+        for i in tqdm(val_we_use_start_idx_80):
+
             labels_phase = []
             for j in range(val_start_vidx[i], val_start_vidx[i] + val_num_each_80[i]):
-                labels_phase.append(val_labels_80[j][0])
+                labels_phase.append(val_labels_80[j])
             labels_phase = torch.LongTensor(labels_phase)
             if use_gpu:
                 labels_phase = labels_phase.to(device)
@@ -298,18 +320,12 @@ for epoch in range(max_epochs):
             for j in range(len(labels_phase)):
                 val_all_labels_phase.append(int(labels_phase.data.cpu()[j]))
 
-            val_progress += 1
-            if val_progress * batch_size >= len(val_we_use_start_idx_80):
-                percent = 100.0
-                print('Val progress: %s [%d/%d]' % (str(percent) + '%', len(val_we_use_start_idx_80),
-                                                    len(val_we_use_start_idx_80)), end='\n')
-            else:
-                percent = round(val_progress * batch_size / len(val_we_use_start_idx_80) * 100, 2)
-                print('Val progress: %s [%d/%d]' % (str(percent) + '%', val_progress * batch_size, len(val_we_use_start_idx_80)),
-                      end='\r')
+            if args.dataset == 'Cholec80' or args.dataset == 'M2CAI':
+                for _ in range(len(preds_phase)):
+                    video_names.append('video_{:02d}'.format(gap_for_dataset[args.dataset] + i))
+
 
     #evaluation only for training reference
-    val_elapsed_time = time.time() - val_start_time
     val_accuracy_phase = float(val_corrects_phase) / len(val_labels_80)
     val_acc_video = np.mean(val_acc_each_video)
     val_average_loss_phase = val_loss_phase
@@ -317,112 +333,49 @@ for epoch in range(max_epochs):
     val_recall_phase = metrics.recall_score(val_all_labels_phase, val_all_preds_phase, average='macro')
     val_precision_phase = metrics.precision_score(val_all_labels_phase, val_all_preds_phase, average='macro')
     val_jaccard_phase = metrics.jaccard_score(val_all_labels_phase, val_all_preds_phase, average='macro')
+    val_fscore_phase = metrics.f1_score(val_all_labels_phase, val_all_preds_phase, average='macro')
     val_precision_each_phase = metrics.precision_score(val_all_labels_phase, val_all_preds_phase, average=None)
     val_recall_each_phase = metrics.recall_score(val_all_labels_phase, val_all_preds_phase, average=None)
 
-    test_progress = 0
-    test_corrects_phase = 0
-    test_all_preds_phase = []
-    test_all_labels_phase = []
-    test_acc_each_video = []
-    test_start_time = time.time()
+    wandb.log({'Accuracy': val_accuracy_phase})
+    wandb.log({'Recall': val_recall_phase})
+    wandb.log({'Precision': val_precision_phase})
+    wandb.log({'Jaccard': val_jaccard_phase})
+    wandb.log({'Fscore': val_fscore_phase})
 
-    with torch.no_grad():
-        for i in test_we_use_start_idx_80:
-            labels_phase = []
-            for j in range(test_start_vidx[i], test_start_vidx[i] + test_num_each_80[i]):
-                labels_phase.append(test_labels_80[j][0])
-            labels_phase = torch.LongTensor(labels_phase)
-            if use_gpu:
-                labels_phase = labels_phase.to(device)
-            else:
-                labels_phase = labels_phase
 
-            long_feature = get_long_feature(start_index=test_start_vidx[i],
-                                            lfb=g_LFB_test, LFB_length=test_num_each_80[i])
+    results = None
+    # Relaxed Evaluation if its neccesary
+    if args.dataset == 'Cholec80':
+        results = relaxed_evaluation_Cholec80(val_all_preds_phase, val_all_labels_phase, video_names)
+        wandb.log({args.dataset: results[args.dataset]})
+    
+    if args.dataset == 'M2CAI':
+        results = relaxed_evaluation_M2CAI(val_all_preds_phase, val_all_labels_phase, video_names)
+        wandb.log({args.dataset: results[args.dataset]})
 
-            long_feature = (torch.Tensor(long_feature)).to(device)
-            video_fe = long_feature.transpose(2, 1)
-
-            out_features = model.forward(video_fe)[-1]
-            out_features = out_features.squeeze(1)
-            p_classes1 = model1(out_features, long_feature)
-
-            p_classes = p_classes1.squeeze()
-            clc_loss = criterion_phase1(p_classes, labels_phase)
-
-            _, preds_phase = torch.max(p_classes.data, 1)
-
-            test_corrects_phase += torch.sum(preds_phase == labels_phase.data)
-            test_acc_each_video.append(float(torch.sum(preds_phase == labels_phase.data)) / test_num_each_80[i])
-            # TODO
-
-            for j in range(len(preds_phase)):
-                test_all_preds_phase.append(int(preds_phase.data.cpu()[j]))
-            for j in range(len(labels_phase)):
-                test_all_labels_phase.append(int(labels_phase.data.cpu()[j]))
-
-            test_progress += 1
-            if test_progress * batch_size >= len(test_we_use_start_idx_80):
-                percent = 100.0
-                print('Test progress: %s [%d/%d]' % (str(percent) + '%', len(test_we_use_start_idx_80),
-                                                    len(test_we_use_start_idx_80)), end='\n')
-            else:
-                percent = round(test_progress * batch_size / len(test_we_use_start_idx_80) * 100, 2)
-                print('Test progress: %s [%d/%d]' % (
-                str(percent) + '%', test_progress * batch_size, len(test_we_use_start_idx_80)),
-                      end='\r')
-
-    test_accuracy_phase = float(test_corrects_phase) / len(test_labels_80)
-    test_acc_video = np.mean(test_acc_each_video)
-    test_elapsed_time = time.time() - test_start_time
-
-    print('epoch: {:4d}'
-          ' train in: {:2.0f}m{:2.0f}s'
-          ' train loss(phase): {:4.4f}'
-          ' train accu(phase): {:.4f}'
-          ' valid in: {:2.0f}m{:2.0f}s'
-          ' valid loss(phase): {:4.4f}'
-          ' valid accu(phase): {:.4f}'
-          ' valid accu(video): {:.4f}'
-          ' test in: {:2.0f}m{:2.0f}s'
-          ' test accu(phase): {:.4f}'
-          ' test accu(video): {:.4f}'
-          .format(epoch,
-                  train_elapsed_time // 60,
-                  train_elapsed_time % 60,
-                  train_average_loss_phase,
-                  train_accuracy_phase,
-                  val_elapsed_time // 60,
-                  val_elapsed_time % 60,
-                  val_average_loss_phase,
-                  val_accuracy_phase,
-                  val_acc_video,
-                  test_elapsed_time // 60,
-                  test_elapsed_time % 60,
-                  test_accuracy_phase,
-                  test_acc_video))
-
-    print("val_precision_each_phase:", val_precision_each_phase)
-    print("val_recall_each_phase:", val_recall_each_phase)
-    print("val_precision_phase", val_precision_phase)
-    print("val_recall_phase", val_recall_phase)
-    print("val_jaccard_phase", val_jaccard_phase)
-
-    if val_accuracy_phase > best_val_accuracy_phase:
-        best_val_accuracy_phase = val_accuracy_phase
-        correspond_train_acc_phase = train_accuracy_phase
-        best_model_wts = copy.deepcopy(model1.state_dict())
+    if val_fscore_phase > best_val_fscore_phase:
+        best_val_fscore_phase = val_fscore_phase
+        best_model_wts = copy.deepcopy(model.state_dict())
         best_epoch = epoch
 
-    save_val_phase = int("{:4.0f}".format(best_val_accuracy_phase * 10000))
-    save_train_phase = int("{:4.0f}".format(correspond_train_acc_phase * 10000))
-    base_name = "TeCNO50_trans1_3_5_1" \
-                + "_length_" + str(sequence_length) \
-                + "_epoch_" + str(best_epoch) \
-                + "_train_" + str(save_train_phase) \
-                + "_val_" + str(save_val_phase)
-    #torch.save(best_model_wts, "./best_model/TeCNO/" + base_name + ".pth")
-    print("best_epoch", str(best_epoch))
+        print("best_epoch", str(best_epoch))
+
+        base_name = f"Transvnet_best_model_epoch_{epoch}_f1_{val_fscore_phase}"
+
+        # Save just the best model based on F1 score
+        os.makedirs(f"Transvnet_models/{args.dataset}", exist_ok=True)        
+        torch.save(best_model_wts, f"Transvnet_models/{args.dataset}/{base_name}.pth")
+        
+
+        if args.dataset == 'Cholec80' or args.dataset == 'M2CAI':
+            wandb.log({'Best metrics': results[args.dataset]})
+
+        else:
+            results = {'Accuracy': val_accuracy_phase, 'Recall': val_recall_phase, 'Precision': val_precision_phase,
+                       'Jaccard': val_jaccard_phase, 'F1_score': val_fscore_phase}
+            
+            wandb.log({'Best Metrics': results})
+
 
 
