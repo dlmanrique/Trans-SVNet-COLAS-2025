@@ -47,11 +47,11 @@ parser.add_argument("--sequence_length", type=int, default=30, help="Length of t
 args = parser.parse_args()
 
 if args.dataset == 'M2CAI':
-    args.num_classes = 8
+    args.out_features = 8
 elif args.dataset == 'HeiCo':
-    args.num_classes = 14
+    args.out_features = 14
 else:
-    args.num_classes = 7
+    args.out_features = 7
 
 
 # Inicializar W&B con los argumentos como configuración
