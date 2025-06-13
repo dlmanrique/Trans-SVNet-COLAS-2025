@@ -184,7 +184,7 @@ criterion_phase1 = nn.CrossEntropyLoss()
 model = mstcn.MultiStageModel(args.mstcn_stages, args.mstcn_layers, args.mstcn_f_maps,
                             args.mstcn_f_dim, args.out_features, args.mstcn_causal_conv)
 
-breakpoint()
+
 model_path = f'TeCNO50_models/{args.dataset}/'
 model_name = 'TeCNO50_best_model.pth'
 
