@@ -44,7 +44,7 @@ def number_frames_each(images_info: List[Dict[str, Union[int, str]]]) -> List[in
 def process_fold(dataset_path: str, fold_path: str, dataset_name: str) -> None:
     #Open annotations for phases (long-term)
     train_anns = open_annotations(os.path.join(fold_path, f"long_term_{dataset_name}_train.json"))
-    test_anns = open_annotations(os.path.join(fold_path, f"long_term_{dataset_name}_valid.json")) #-> just for Autolaparo set the valid set as test and then make inference in the real test file
+    test_anns = open_annotations(os.path.join(fold_path, f"long_term_{dataset_name}_test.json")) #-> just for Autolaparo set the valid set as test and then make inference in the real test file
 
     train_img_path = get_img_path(dataset_path, train_anns["images"])
     test_img_path = get_img_path(dataset_path, test_anns["images"])
@@ -67,7 +67,7 @@ def process_fold(dataset_path: str, fold_path: str, dataset_name: str) -> None:
 
     os.makedirs('pkl_datasets_files', exist_ok=True)
 
-    with open(f"pkl_datasets_files/train_val_paths_labels_{dataset_name}.pkl", "wb") as file:
+    with open(f"pkl_datasets_files/train_test_paths_labels_{dataset_name}.pkl", "wb") as file:
         pkl.dump(all_info, file)
 
 

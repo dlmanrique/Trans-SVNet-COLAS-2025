@@ -507,7 +507,7 @@ def train_model(train_dataset, train_num_each, val_dataset, val_num_each):
     global g_LFB_train
     global g_LFB_val
     print("loading features!>.........")
-
+    
     if not load_exist_LFB:
 
         train_feature_loader = DataLoader(
@@ -551,10 +551,12 @@ def train_model(train_dataset, train_num_each, val_dataset, val_num_each):
 
         train_video_ids = []
         valid_video_ids = []
+        features_list = []
 
+        breakpoint()
         with torch.no_grad():
             #'''
-            for data in tqdm(train_feature_loader):
+            """for data in tqdm(train_feature_loader):
                 
                 if use_gpu:
                     inputs, labels_phase = data[0].to(device), data[1].to(device)
@@ -564,13 +566,14 @@ def train_model(train_dataset, train_num_each, val_dataset, val_num_each):
                 inputs = inputs.view(-1, sequence_length, 3, 224, 224)
                 outputs_feature = model_LFB.forward(inputs).data.cpu().numpy()
 
-                g_LFB_train = np.concatenate((g_LFB_train, outputs_feature), axis=0)
-
+                #g_LFB_train = np.concatenate((g_LFB_train, outputs_feature), axis=0)
+                features_list.append(outputs_feature)
                 
                 # Add video names to the general list
-                train_video_ids.extend(list(data[3]))
+                train_video_ids.extend(list(data[3]))"""
 
             for data in tqdm(val_feature_loader):
+
                 if use_gpu:
                     inputs, labels_phase = data[0].to(device), data[1].to(device)
                 else:
@@ -579,37 +582,38 @@ def train_model(train_dataset, train_num_each, val_dataset, val_num_each):
                 inputs = inputs.view(-1, sequence_length, 3, 224, 224)
                 outputs_feature = model_LFB.forward(inputs).data.cpu().numpy()
 
-                g_LFB_val = np.concatenate((g_LFB_val, outputs_feature), axis=0)
+                #g_LFB_val = np.concatenate((g_LFB_val, outputs_feature), axis=0)
+                features_list.append(outputs_feature)
 
             #'''
                 # Add video names to the general list
                 valid_video_ids.extend(list(data[3]))
-
+        breakpoint()
         print("finish!")
-        g_LFB_train = np.array(g_LFB_train)
-        g_LFB_val = np.array(g_LFB_val)
+        #g_LFB_train = np.array(g_LFB_train)
+        g_LFB_val = np.array(features_list)
         
         #'''
         os.makedirs(f'LFB/{args.dataset}', exist_ok=True)
-        with open(f'LFB/{args.dataset}/g_LFB50_train.pkl', 'wb') as f:
-            pickle.dump(g_LFB_train, f)
+        #with open(f'LFB/{args.dataset}/g_LFB50_train.pkl', 'wb') as f:
+        #    pickle.dump(g_LFB_train, f)
 
-        with open(f'LFB/{args.dataset}/g_LFB50_val.pkl', 'wb') as f:
+        with open(f'LFB/{args.dataset}/g_LFB50_test.pkl', 'wb') as f:
             pickle.dump(g_LFB_val, f)
         #'''
 
         # Save video ids lists
-        video_ids = {'Train': train_video_ids, 'Valid': valid_video_ids}
+        #video_ids = {'Train': train_video_ids, 'Valid': valid_video_ids}
 
-        os.makedirs(f"Video_ids/{args.dataset}", exist_ok=True)
-        with open(f"Video_ids/{args.dataset}/video_numbers.json", "w") as f:
-            json.dump(video_ids, f, indent=4)
+        #os.makedirs(f"Video_ids/{args.dataset}", exist_ok=True)
+        #with open(f"Video_ids/{args.dataset}/video_numbers.json", "w") as f:
+        #    json.dump(video_ids, f, indent=4)
 
 
 def main():
 
     train_dataset_80, train_num_each_80, \
-    val_dataset, val_num_each = get_data(f'pkl_datasets_files/train_val_paths_labels_{args.dataset}.pkl')
+    val_dataset, val_num_each = get_data(f'pkl_datasets_files/train_test_paths_labels_{args.dataset}.pkl')
 
     train_model((train_dataset_80),
                 (train_num_each_80),
