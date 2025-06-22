@@ -581,8 +581,9 @@ def train_model(train_dataset, train_num_each, val_dataset, val_num_each):
 
                 inputs = inputs.view(-1, sequence_length, 3, 224, 224)
                 outputs_feature = model_LFB.forward(inputs).data.cpu().numpy()
-
+                outputs_feature = outputs_feature.copy()
                 #g_LFB_val = np.concatenate((g_LFB_val, outputs_feature), axis=0)
+
                 features_list.append(outputs_feature)
 
             #'''

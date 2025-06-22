@@ -356,7 +356,7 @@ for epoch in tqdm(range(args.max_epochs)):
 
     if val_fscore_phase > best_val_fscore_phase:
         best_val_fscore_phase = val_fscore_phase
-        best_model_wts = copy.deepcopy(model.state_dict())
+        best_model_wts = copy.deepcopy(model1.state_dict())
         best_epoch = epoch
 
         print("best_epoch", str(best_epoch))

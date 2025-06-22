@@ -118,7 +118,7 @@ def get_long_feature(start_index, lfb, LFB_length):
     return long_feature
 
 
-test_labels_80, test_num_each_80, test_start_vidx, test_paths  = get_data(f'pkl_datasets_files/train_test_paths_labels_{args.dataset}.pkl')
+test_labels_80, test_num_each_80, test_start_vidx, test_paths  = get_data(f'pkl_datasets_files/train_val_paths_labels_{args.dataset}.pkl')
 
 
 
